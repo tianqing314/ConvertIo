@@ -1,3 +1,6 @@
+using ConvertPro.Services;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,9 +11,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
-using ConvertPro.Services;
-using Microsoft.Web.WebView2.Core;
-using Microsoft.Win32;
 
 namespace ConvertPro
 {
@@ -69,14 +69,58 @@ namespace ConvertPro
         // ================================================================
         // WebView2 初始化
         // ================================================================
+        /// <summary>
+        /// 查找系统上已安装的 WebView2 Runtime 文件夹
+        /// </summary>
+        private static string? FindWebView2RuntimeFolder()
+        {
+            // 候选安装根目录（x86 和 x64）
+            string[] roots = [
+                @"C:\Program Files (x86)\Microsoft\EdgeWebView\Application",
+                @"C:\Program Files\Microsoft\EdgeWebView\Application",
+            ];
+
+            foreach (var root in roots)
+            {
+                if (!Directory.Exists(root)) continue;
+
+                // 取最高版本号目录（目录名格式如 "149.0.4022.69"）
+                var versionDirs = Directory.GetDirectories(root)
+                    .Select(Path.GetFileName)
+                    .Where(v => Version.TryParse(v, out _))
+                    .OrderByDescending(v => v, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                foreach (var ver in versionDirs)
+                {
+                    var candidate = Path.Combine(root, ver);
+                    if (File.Exists(Path.Combine(candidate, "msedgewebview2.exe")))
+                        return candidate;
+                }
+            }
+            return null;
+        }
+
         private async Task InitializeWebViewAsync()
         {
             var userDataFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "ConvertPro", "WebView2");
 
-            // ⚠️ 使用默认 CreateAsync — WebView2 会自动查找已安装的运行时
-            var env = await CoreWebView2Environment.CreateAsync(userDataFolder);
+            // 显式查找 WebView2 Runtime 文件夹，绕过注册表查找
+            var browserFolder = FindWebView2RuntimeFolder();
+            if (browserFolder == null)
+            {
+                MessageBox.Show(
+                    "未找到 WebView2 Runtime，程序无法运行。\n\n" +
+                    "请从以下地址下载并安装 WebView2 Runtime：\n" +
+                    "https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
+                    "缺少 WebView2 Runtime", MessageBoxButton.OK, MessageBoxImage.Error);
+                Application.Current.Shutdown();
+                return;
+            }
+
+            var env = await CoreWebView2Environment.CreateAsync(browserFolder, userDataFolder);
             await webView.EnsureCoreWebView2Async(env);
 
             var wwwroot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wwwroot");
@@ -235,8 +279,11 @@ namespace ConvertPro
             // 解析文件路径列表
             var pathsJson = data.GetProperty("files");
             var inputFiles = pathsJson.EnumerateArray()
-                .Select(f => f.GetProperty("path").GetString()!)
+                .Select(f => f.GetProperty("path").GetString() ?? "")
                 .ToList();
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[ConvertPro] 开始转换: type={convType}, files={string.Join(", ", inputFiles)}");
 
             var outputDir = ConversionManager.GetDefaultOutputDir();
 
@@ -274,6 +321,10 @@ namespace ConvertPro
                 size = r.OutputSize
             }).ToList();
 
+            foreach (var r in resultList)
+                System.Diagnostics.Debug.WriteLine(
+                    $"[ConvertPro] 结果: success={r.success}, name={r.name}, error={r.error}, path={r.path}");
+
             var resultJson = JsonSerializer.Serialize(resultList);
             await webView.CoreWebView2.ExecuteScriptAsync(
                 $"window.__onConvertComplete({resultJson})");
@@ -292,7 +343,11 @@ namespace ConvertPro
         private void OpenOutputFolder()
         {
             var dir = Services.ConversionManager.GetDefaultOutputDir();
-            System.Diagnostics.Process.Start("explorer.exe", dir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = dir,
+                UseShellExecute = true
+            });
         }
 
         // ================================================================

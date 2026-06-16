@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -48,7 +49,15 @@ public class ConversionManager
                 new(false, "", $"不支持的转换类型: {conversionType}")
             };
 
-        return await service.ConvertAsync(inputFiles, outputDir,
+        // 过滤掉空路径，避免下游服务崩溃
+        var validFiles = inputFiles.Where(f => !string.IsNullOrWhiteSpace(f)).ToList();
+        if (validFiles.Count == 0)
+            return new List<ConversionResult>
+            {
+                new(false, "", "未提供有效的文件路径，请通过文件对话框选择文件。")
+            };
+
+        return await service.ConvertAsync(validFiles, outputDir,
             options, progress, ct);
     }
 

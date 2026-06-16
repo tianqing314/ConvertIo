@@ -1249,8 +1249,10 @@ document.querySelectorAll('.drop-zone').forEach(zone => {
     });
 });
 document.querySelectorAll('.file-input').forEach(input => {
-    input.addEventListener('change', function() {
-        if (this.files && this.files.length) validateAndLoad(this.dataset.page, this.files);
+    input.addEventListener('click', function(e) {
+        e.preventDefault();
+        const pageId = this.dataset.page;
+        window.postAction('open_file', { type: pageId });
     });
 });
 
@@ -1287,7 +1289,19 @@ function validateAndLoad(pageId, fileList) {
    ============================================================ */
 function handleFilesForPage(pageId, files) {
     const st = getState(pageId);
-    st.files = files; st.cancelled = false;
+    // WebView2 拖拽的 File 对象可能带 .path 属性（Chromium 非标准）
+    const arr = Array.from(files);
+    const hasPath = arr.some(f => f.path);
+    if (!hasPath) {
+        // 浏览器 File 对象无 path，需要走 C# 对话框
+        showToast('请通过点击选择文件（拖拽暂不支持）', 'info');
+        window.postAction('open_file', { type: pageId });
+        return;
+    }
+    st.files = arr.map(f => ({
+        name: f.name, size: f.size, path: f.path, _realPath: f.path
+    }));
+    st.cancelled = false;
     const PA = q(`.preview-area[data-page="${pageId}"]`);
     if (!PA) return;
     PA.classList.add('visible');
@@ -2632,6 +2646,7 @@ window.__onConvertProgress = function(p) {
 };
 
 window.__onConvertComplete = function(results) {
+    console.log('[ConvertPro] 转换结果:', JSON.stringify(results, null, 2));
     const pageId = document.querySelector('.page.active')?.id?.replace('page-', '');
     if (!pageId) return;
     const btn = q(`.btn-convert[data-page="${pageId}"]`);
@@ -2641,8 +2656,9 @@ window.__onConvertComplete = function(results) {
     q(`.progress-bar[data-page="${pageId}"]`).classList.remove('visible');
     const ds = q(`.done-section[data-page="${pageId}"]`);
     if (ds) ds.classList.add('visible');
-    q(`.page.active .status-text`).textContent = '转换完成 ✅';
-    statusHint.textContent = '转换完成 ✅';
+    const hasErr = results.some(r => !r.success);
+    q(`.page.active .status-text`).textContent = hasErr ? '部分完成 ⚠️' : '转换完成 ✅';
+    statusHint.textContent = hasErr ? '部分文件转换失败' : '转换完成 ✅';
     // 输出文件列表
     const ofDiv = ds ? ds.querySelector('.output-files') : null;
     if (ofDiv && results.length) {
@@ -2657,8 +2673,8 @@ window.__onConvertComplete = function(results) {
         ofDiv.innerHTML = h;
     }
     if (DOC_PREVIEW_DATA && DOC_PREVIEW_DATA[pageId]) populateOutputPreview(pageId);
-    const hasErr = results.some(r => !r.success);
-    showToast(hasErr ? '部分文件转换失败' : '转换完成！', hasErr ? 'warning' : 'success');
+    const errList = results.filter(r => !r.success).map(r => r.error || '未知错误');
+    showToast(hasErr ? `转换失败: ${errList.join('; ')}` : '转换完成！', hasErr ? 'error' : 'success');
 };
 
 window.__onOutputDir = function(dir) {

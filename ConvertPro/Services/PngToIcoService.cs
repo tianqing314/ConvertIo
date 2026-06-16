@@ -44,6 +44,12 @@ public class PngToIcoService : IConversionService
 
             try
             {
+                if (string.IsNullOrWhiteSpace(file))
+                    throw new ArgumentException("文件路径为空，请通过文件对话框选择文件。");
+
+                // 确保输出目录存在
+                Directory.CreateDirectory(outputDir);
+
                 var icoPath = Path.Combine(outputDir,
                     Path.GetFileNameWithoutExtension(file) + ".ico");
 
@@ -100,6 +106,10 @@ public class PngToIcoService : IConversionService
     /// </summary>
     private void GenerateIcoFile(string pngPath, string icoPath, int[] sizes)
     {
+        // 检查源文件是否存在
+        if (!File.Exists(pngPath))
+            throw new FileNotFoundException($"PNG 文件不存在: {pngPath}");
+
         // 读取源 PNG
         using var srcBmp = new Bitmap(pngPath);
 
