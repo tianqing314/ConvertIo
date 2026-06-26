@@ -317,3 +317,7 @@ MigrationBackup/
 
 # Ionide (cross platform F# VS Code tools) working folder
 .ionide/
+# IDE/Tool local files
+.codegraph/
+.trae-cn/
+*.pid

@@ -25,12 +25,24 @@ public class ConversionManager
 
         // PDF→Word：Python pdf2docx 优先（已安装 Python）
         Register(new MultiEnginePdfToWordService(_pythonPdf2Docx, _wordCom, _loConverter, new PdfToWordService()));
-        
+
         // 其他文档转换
         Register(new WordComOrLibreOfficeService("word2pdf", "pdf", _wordCom, _loConverter, new WordToPdfService()));
         Register(new WordComOrLibreOfficeService("pdf2excel", "xlsx", null, _loConverter, new PdfToExcelService()));
         Register(new WordComOrLibreOfficeService("excel2pdf", "pdf", null, _loConverter, new ExcelToPdfService()));
-        Register(new WordComOrLibreOfficeService("pdf2ppt", "pptx", null, _loConverter, new PdfToPptService()));
+        // pdf2ppt：AI 生成是首选路径（AI 不可用时内部回退到文本→幻灯片），
+        // 不再走 LibreOffice（LibreOffice 的 PDF→PPT 是图元堆砌，效果差，正是要解决的问题）
+        Register(new PdfToPptService());
+
+        // ===== 互相转换矩阵补齐 =====
+        // PPT→PDF：LibreOffice 直接转换，保真度好
+        Register(new WordComOrLibreOfficeService("ppt2pdf", "pdf", null, _loConverter, null));
+        // Word→PPT：复用 PdfToPptService 的 AI 大纲 + 文生图 + PptRenderer 管线
+        Register(new WordToPptService());
+        // Excel→Word：ClosedXML 读 + OpenXml 写
+        Register(new ExcelToWordService());
+        // Word→Excel：OpenXml 读 + ClosedXML 写
+        Register(new WordToExcelService());
     }
 
     public void Register(IConversionService service)
@@ -88,6 +100,24 @@ public class ConversionManager
     public bool IsWordComAvailable => _wordCom?.IsAvailable ?? false;
     public bool IsLibreOfficeAvailable => _loConverter?.IsAvailable ?? false;
 
+    /// <summary>
+    /// 根据转换类型返回目标文件扩展名（不含点）。用于冲突检测预判输出文件名。
+    /// </summary>
+    public static string GetTargetExtension(string conversionType) => conversionType switch
+    {
+        "png2ico"   => "ico",
+        "pdf2word"  => "docx",
+        "word2pdf"  => "pdf",
+        "pdf2excel" => "xlsx",
+        "excel2pdf" => "pdf",
+        "pdf2ppt"   => "pptx",
+        "ppt2pdf"   => "pdf",
+        "word2ppt"  => "pptx",
+        "excel2word" => "docx",
+        "word2excel" => "xlsx",
+        _           => "out"
+    };
+
     public static string GetDefaultOutputDir()
     {
         var dir = Path.Combine(
@@ -95,191 +125,5 @@ public class ConversionManager
             "ConvertPro_Output");
         Directory.CreateDirectory(dir);
         return dir;
-    }
-}
-
-/// <summary>
-/// 多级回退转换服务：Word COM → LibreOffice → 手动实现。
-/// </summary>
-public class WordComOrLibreOfficeService : IConversionService
-{
-    private readonly string _convType;
-    private readonly string _targetExt;
-    private readonly WordComConverter? _wordCom;
-    private readonly LibreOfficeConverter? _lo;
-    private readonly IConversionService? _fallback;
-
-    public string ConversionType => _convType;
-    public bool SupportsBatch => true;
-
-    public WordComOrLibreOfficeService(string type, string targetExt,
-        WordComConverter? wordCom, LibreOfficeConverter? lo,
-        IConversionService? fallback = null)
-    {
-        _convType = type;
-        _targetExt = targetExt;
-        _wordCom = wordCom;
-        _lo = lo;
-        _fallback = fallback;
-    }
-
-    public async Task<List<ConversionResult>> ConvertAsync(
-        List<string> inputFiles, string outputDir, string? options,
-        IProgress<ConversionProgress> progress, CancellationToken ct)
-    {
-        var results = new List<ConversionResult>();
-
-        for (int i = 0; i < inputFiles.Count; i++)
-        {
-            ct.ThrowIfCancellationRequested();
-            var file = inputFiles[i];
-
-            progress?.Report(new ConversionProgress(
-                inputFiles.Count, i, Path.GetFileName(file),
-                (double)i / inputFiles.Count * 100));
-
-            try
-            {
-                string? resultPath = null;
-
-                // 1. 尝试 Word COM（最高保真度）
-                if (_wordCom?.IsAvailable == true &&
-                    (_convType == "pdf2word" || _convType == "word2pdf"))
-                {
-                    resultPath = _convType == "pdf2word"
-                        ? await _wordCom.ConvertPdfToWordAsync(file, outputDir)
-                        : await _wordCom.ConvertWordToPdfAsync(file, outputDir);
-                }
-
-                // 2. 尝试 LibreOffice
-                if (resultPath == null && _lo?.IsAvailable == true)
-                {
-                    resultPath = await _lo.ConvertAsync(
-                        file, outputDir, _targetExt, ct);
-                }
-
-                // 3. 手动回退
-                if (resultPath == null && _fallback != null)
-                {
-                    var fallbackResults = await _fallback.ConvertAsync(
-                        new List<string> { file }, outputDir, options,
-                        new Progress<ConversionProgress>(), ct);
-                    var fr = fallbackResults.Count > 0 ? fallbackResults[0]
-                        : new ConversionResult(false, "", "转换失败");
-                    results.Add(fr);
-                    progress?.Report(new ConversionProgress(
-                        inputFiles.Count, i + 1, "",
-                        (double)(i + 1) / inputFiles.Count * 100));
-                    continue;
-                }
-
-                if (resultPath != null)
-                {
-                    results.Add(new ConversionResult(true, resultPath,
-                        OutputSize: new FileInfo(resultPath).Length));
-                }
-                else
-                {
-                    results.Add(new ConversionResult(false, "",
-                        "无可用的转换引擎。请安装 Microsoft Word 或 LibreOffice。"));
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                results.Add(new ConversionResult(false, "", "已取消"));
-                break;
-            }
-            catch (Exception ex)
-            {
-                results.Add(new ConversionResult(false, "", ex.Message));
-            }
-
-            progress?.Report(new ConversionProgress(
-                inputFiles.Count, i + 1, "",
-                (double)(i + 1) / inputFiles.Count * 100));
-        }
-
-        return results;
-    }
-}
-
-/// <summary>
-/// PDF→Word 多引擎服务：Python pdf2docx → Word COM → LibreOffice → PdfPig。
-/// </summary>
-public class MultiEnginePdfToWordService : IConversionService
-{
-    private readonly PythonPdf2DocxConverter _python;
-    private readonly WordComConverter? _wordCom;
-    private readonly LibreOfficeConverter? _lo;
-    private readonly IConversionService _fallback;
-
-    public string ConversionType => "pdf2word";
-    public bool SupportsBatch => true;
-
-    public MultiEnginePdfToWordService(
-        PythonPdf2DocxConverter python, WordComConverter? wordCom,
-        LibreOfficeConverter? lo, IConversionService fallback)
-    {
-        _python = python; _wordCom = wordCom; _lo = lo; _fallback = fallback;
-    }
-
-    public async Task<List<ConversionResult>> ConvertAsync(
-        List<string> inputFiles, string outputDir, string? options,
-        IProgress<ConversionProgress> progress, CancellationToken ct)
-    {
-        var results = new List<ConversionResult>();
-
-        for (int i = 0; i < inputFiles.Count; i++)
-        {
-            ct.ThrowIfCancellationRequested();
-            var file = inputFiles[i];
-            progress?.Report(new ConversionProgress(inputFiles.Count, i,
-                Path.GetFileName(file), (double)i / inputFiles.Count * 100));
-
-            try
-            {
-                string? resultPath = null;
-
-                // 1. Python pdf2docx（最佳，已验证可以正确转换该 PDF）
-                if (_python.IsAvailable)
-                    resultPath = await _python.ConvertAsync(file, outputDir, ct);
-
-                // 2. Word COM
-                if (resultPath == null && _wordCom?.IsAvailable == true)
-                    resultPath = await _wordCom.ConvertPdfToWordAsync(file, outputDir);
-
-                // 3. LibreOffice
-                if (resultPath == null && _lo?.IsAvailable == true)
-                    resultPath = await _lo.ConvertAsync(file, outputDir, "docx", ct);
-
-                // 4. 回退
-                if (resultPath == null)
-                {
-                    var fr = await _fallback.ConvertAsync(
-                        new List<string> { file }, outputDir, options,
-                        new Progress<ConversionProgress>(), ct);
-                    results.Add(fr.Count > 0 ? fr[0] : new ConversionResult(false, "", "转换失败"));
-                }
-                else
-                {
-                    results.Add(new ConversionResult(true, resultPath,
-                        OutputSize: new FileInfo(resultPath).Length));
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                results.Add(new ConversionResult(false, "", "已取消"));
-                break;
-            }
-            catch (Exception ex)
-            {
-                results.Add(new ConversionResult(false, "", ex.Message));
-            }
-
-            progress?.Report(new ConversionProgress(inputFiles.Count, i + 1, "",
-                (double)(i + 1) / inputFiles.Count * 100));
-        }
-
-        return results;
     }
 }

@@ -19,6 +19,9 @@
     
     <!-- PDF 读取 -->
     <PackageReference Include="PdfPig" Version="0.1.14" />
+
+    <!-- PDF 表格识别（tabula-sharp，基于 PdfPig） -->
+    <PackageReference Include="Tabula" Version="1.0.1" />
     
     <!-- PDF 生成 -->
     <PackageReference Include="QuestPDF" Version="2026.6.0" />
